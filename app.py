@@ -19,7 +19,7 @@ import gradio as gr
 sys.path.insert(0, os.path.dirname(__file__))
 
 from crawlers import get_crawler, VideoResult, ArticleResult
-from processor import Transcriber, Summarizer, XfyunASR, generate_video_report
+from processor import Transcriber, Summarizer, XfyunASR, generate_video_report, TimelineAgent
 from utils.helpers import detect_platform, is_video_url
 from utils.progress import logger
 from config import (
@@ -506,6 +506,29 @@ def process_url_streaming(url: str, enable_llm: bool = True):
                 )
                 logger.step_end()
 
+                # 时间线总结（Plan-Execute Agent）
+                logger.step_begin("生成时间线梳理")
+                yield _status(f"📋 {platform_name} — 生成时间线（Plan-Execute Agent）..."), "", platform_tag, "", "", ""
+                try:
+                    tl_agent = TimelineAgent()
+                    timeline_text = tl_agent.process(
+                        title=result.title,
+                        content=transcript_text,
+                        content_type="视频",
+                    )
+                    if timeline_text and not timeline_text.startswith("⚠️"):
+                        from utils.helpers import sanitize_filename
+                        safe = sanitize_filename(result.title)
+                        tl_dir = os.path.join(OUTPUT_DIR, safe)
+                        os.makedirs(tl_dir, exist_ok=True)
+                        tl_path = os.path.join(tl_dir, "timeline.md")
+                        with open(tl_path, 'w', encoding='utf-8') as f:
+                            f.write(timeline_text)
+                        logger.detail(f"时间线已保存: {os.path.basename(tl_path)}")
+                except Exception as e:
+                    logger.warn(f"时间线生成失败: {e}")
+                logger.step_end()
+
             logger.success("处理完成")
 
             # 构建完整内容展示
@@ -519,7 +542,11 @@ def process_url_streaming(url: str, enable_llm: bool = True):
                 txt_name = os.path.splitext(os.path.basename(result.audio_path))[0] + "_transcript.txt"
                 download_info += f"\n📝 转写: `{OUTPUT_DIR}/{txt_name}`" if download_info else f"📝 转写: `{OUTPUT_DIR}/{txt_name}`"
             if report_path:
+                report_dir = os.path.dirname(report_path)
+                tl_path = os.path.join(report_dir, "timeline.md")
                 download_info += f"\n📋 报告: `{report_path}`" if download_info else f"📋 报告: `{report_path}`"
+                if os.path.exists(tl_path):
+                    download_info += f"\n⏱ 时间线: `{tl_path}`"
 
             yield f"✅ {platform_name} 处理完成", result.title, platform_tag, full_content, summary, download_info
             return
@@ -531,6 +558,7 @@ def process_url_streaming(url: str, enable_llm: bool = True):
                 f"### {result.title}\n\n{result.content_markdown[:1500]}...", "", \
                 f"📄 Markdown: `{result.markdown_path}`"
 
+            summary = ""
             if enable_llm and result.content_markdown:
                 logger.step_begin("LLM总结文章")
                 yield _status(f"🤖 {platform_name} — AI 总结中..."), "", platform_tag, "", "", ""
@@ -540,15 +568,38 @@ def process_url_streaming(url: str, enable_llm: bool = True):
                     content=result.content_markdown,
                 )
                 logger.step_end()
-                logger.success("处理完成")
-                full_md = f"### {result.title}\n\n{result.content_markdown}"
-                yield f"✅ {platform_name} 处理完成", result.title, platform_tag, full_md, summary, \
-                    f"📄 Markdown: `{result.markdown_path}`"
-                return
 
+            # 时间线梳理
+            if result.content_markdown:
+                logger.step_begin("生成时间线梳理")
+                yield _status(f"📋 {platform_name} — 生成时间线（Plan-Execute Agent）..."), "", platform_tag, "", "", ""
+                try:
+                    tl_agent = TimelineAgent()
+                    timeline_text = tl_agent.process(
+                        title=result.title,
+                        content=result.content_markdown,
+                        content_type="文章",
+                    )
+                    if timeline_text and not timeline_text.startswith("⚠️"):
+                        tl_filename = os.path.splitext(os.path.basename(result.markdown_path))[0]
+                        tl_dir = os.path.dirname(result.markdown_path)
+                        tl_path = os.path.join(tl_dir, f"{tl_filename}_timeline.md")
+                        with open(tl_path, 'w', encoding='utf-8') as f:
+                            f.write(timeline_text)
+                        logger.detail(f"时间线已保存: {os.path.basename(tl_path)}")
+                except Exception as e:
+                    logger.warn(f"时间线生成失败: {e}")
+                logger.step_end()
+
+            logger.success("处理完成")
             full_md = f"### {result.title}\n\n{result.content_markdown}" if result.content_markdown else ""
-            yield f"✅ {platform_name} 处理完成", result.title, platform_tag, full_md, "", \
-                f"📄 Markdown: `{result.markdown_path}`"
+            info = f"📄 Markdown: `{result.markdown_path}`"
+            tl_check = os.path.join(os.path.dirname(result.markdown_path) if result.markdown_path else OUTPUT_DIR,
+                                     os.path.splitext(os.path.basename(result.markdown_path or ""))[0] + "_timeline.md")
+            if os.path.exists(tl_check):
+                info += f"\n⏱ 时间线: `{tl_check}`"
+            yield f"✅ {platform_name} 处理完成", result.title, platform_tag, full_md, summary, info
+            return
 
     except ValueError as e:
         logger.error(f"不支持的链接: {e}")
