@@ -1,0 +1,25 @@
+# Web UI
+gradio>=5.0.0
+
+# B站视频
+bilibili-api-python>=16.0.0
+yt-dlp>=2024.0.0
+
+# HTTP & 解析
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+markdownify>=0.13.0
+
+# 语音转文字
+faster-whisper>=1.0.0
+# 或者使用 openai-whisper
+# openai-whisper>=20231117
+
+# LLM
+openai>=1.0.0
+
+# 工具
+ffmpeg-python>=0.2.0
+python-dotenv>=1.0.0
+socksio>=1.0.0              # SOCKS 代理支持（如使用代理）
