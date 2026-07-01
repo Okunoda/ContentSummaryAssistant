@@ -11,6 +11,7 @@ class VideoResult:
     title: str = ""
     description: str = ""
     video_path: str = ""        # 下载的视频文件路径
+    video_url: str = ""         # 视频流地址（用于在线截图，不下载完整文件）
     audio_path: str = ""         # 提取的音频文件路径
     subtitle_text: str = ""      # 字幕文本（如果有）
     transcript_text: str = ""    # 转写文本（Whisper结果）

@@ -19,7 +19,7 @@ import gradio as gr
 sys.path.insert(0, os.path.dirname(__file__))
 
 from crawlers import get_crawler, VideoResult, ArticleResult
-from processor import Transcriber, Summarizer, XfyunASR
+from processor import Transcriber, Summarizer, XfyunASR, generate_video_report
 from utils.helpers import detect_platform, is_video_url
 from utils.progress import logger
 from config import (
@@ -465,6 +465,7 @@ def process_url_streaming(url: str, enable_llm: bool = True):
                     logger.error(f"转写异常: {e}")
 
             # AI 总结
+            summary = ""
             if enable_llm and transcript_text:
                 logger.step_begin("LLM总结")
                 yield _status(f"🤖 {platform_name} — AI 总结中..."), "", platform_tag, "", "", ""
@@ -474,29 +475,54 @@ def process_url_streaming(url: str, enable_llm: bool = True):
                     transcript=transcript_text,
                 )
                 logger.step_end()
-                logger.success("处理完成")
 
-                # 构建完整内容展示
-                full_content = f"### {result.title}\n\n{transcript_text}" if transcript_text else ""
-                download_info = ""
-                if result.audio_path:
-                    download_info = f"🎵 音频: `{result.audio_path}`"
-                if result.transcript_text:
-                    txt_name = os.path.splitext(os.path.basename(result.audio_path))[0] + "_transcript.txt"
-                    download_info += f"\n📝 转写: `{OUTPUT_DIR}/{txt_name}`" if download_info else f"📝 转写: `{OUTPUT_DIR}/{txt_name}`"
+            # 生成完整报告（截图 + 转写 + 总结）
+            report_path = ""
+            video_src = result.video_url or result.video_path
+            if transcript_text:
+                logger.step_begin("生成视频报告")
+                has_video = bool(video_src)
+                msg = "生成报告中（截图+转写+总结）..." if has_video else "生成报告中（无视频源，跳过截图）..."
+                yield _status(f"📋 {platform_name} — {msg}"), "", platform_tag, "", "", ""
+                try:
+                    import subprocess
+                    dur_proc = subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "csv=p=0", video_src if has_video else result.audio_path],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    duration = float(dur_proc.stdout.strip()) if dur_proc.stdout.strip() else 60.0
+                except Exception:
+                    duration = 60.0
 
-                yield f"✅ {platform_name} 处理完成", result.title, platform_tag, full_content, summary, download_info
-                return
+                report_path = generate_video_report(
+                    video_src=video_src or "",
+                    title=result.title,
+                    platform=platform,
+                    duration=duration,
+                    transcript_text=transcript_text,
+                    summary_text=summary,
+                    segment_seconds=15,
+                )
+                logger.step_end()
 
-            # 无LLM但有内容
+            logger.success("处理完成")
+
+            # 构建完整内容展示
             full_content = f"### {result.title}\n\n{transcript_text}" if transcript_text else ""
             download_info = ""
+            if result.video_path:
+                download_info = f"🎬 视频: `{result.video_path}`"
             if result.audio_path:
-                download_info = f"🎵 音频: `{result.audio_path}`"
+                download_info += f"\n🎵 音频: `{result.audio_path}`" if download_info else f"🎵 音频: `{result.audio_path}`"
             if result.transcript_text:
                 txt_name = os.path.splitext(os.path.basename(result.audio_path))[0] + "_transcript.txt"
-                download_info += f"\n📝 转写: `{OUTPUT_DIR}/{txt_name}`"
-            yield f"✅ {platform_name} 处理完成 (无AI总结)", result.title, platform_tag, full_content, "", download_info
+                download_info += f"\n📝 转写: `{OUTPUT_DIR}/{txt_name}`" if download_info else f"📝 转写: `{OUTPUT_DIR}/{txt_name}`"
+            if report_path:
+                download_info += f"\n📋 报告: `{report_path}`" if download_info else f"📋 报告: `{report_path}`"
+
+            yield f"✅ {platform_name} 处理完成", result.title, platform_tag, full_content, summary, download_info
+            return
 
         elif isinstance(result, ArticleResult):
             # === 文章处理 ===

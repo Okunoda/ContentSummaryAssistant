@@ -26,6 +26,42 @@ class BilibiliCrawler(BaseCrawler):
         self.platform = "bilibili"
         self.errors: list[str] = []  # 收集所有错误信息
 
+    def _run_ytdlp_with_progress(self, cmd: list[str], timeout: int = 300) -> tuple[int, str, str]:
+        """运行 yt-dlp 并实时打印下载进度
+
+        yt-dlp 输出格式: [download]  12.3% of ~20MiB ...
+        Returns: (returncode, stdout, stderr)
+        """
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, bufsize=1)
+        all_lines = []
+        last_pct = -1
+
+        try:
+            for line in proc.stdout:
+                all_lines.append(line)
+                line = line.strip()
+                if not line:
+                    continue
+                pct_match = re.search(r'([\d.]+)%', line)
+                if pct_match and '[download]' in line:
+                    pct = int(float(pct_match.group(1)))
+                    if pct != last_pct and pct % 10 == 0:
+                        last_pct = pct
+                        logger.detail(f"下载进度: {pct}%")
+                elif '[download]' in line and 'already been downloaded' in line:
+                    logger.detail("文件已缓存，跳过下载")
+
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return (-1, "", "下载超时")
+        except Exception:
+            proc.kill()
+            return (-1, "", "下载异常")
+
+        return (proc.returncode, ''.join(all_lines), "")
+
     def _get_credential(self):
         """创建 B站 Credential（如果有 Cookie 则使用）"""
         if BILI_SESSDATA:
@@ -109,6 +145,17 @@ class BilibiliCrawler(BaseCrawler):
                     if not self.errors:
                         self.errors.append("音频下载失败")
                     logger.step_end("失败")
+
+            # 5. 下载视频（用于截图）
+            if result.audio_path and not result.video_path:
+                logger.step_begin("下载B站视频（用于截图）")
+                video_path = self._download_video_ytdlp(url, result.title)
+                if video_path:
+                    result.video_path = video_path
+                    logger.detail(f"视频: {os.path.basename(video_path)}")
+                else:
+                    logger.warn("视频下载失败，报告将不含截图")
+                logger.step_end()
 
             if self.errors:
                 result.error = "; ".join(self.errors)
@@ -411,15 +458,16 @@ class BilibiliCrawler(BaseCrawler):
                 "--extract-audio",
                 "--audio-format", "mp3",
                 "--audio-quality", "0",
+                "--newline",
                 "-o", output_template,
                 "--no-playlist",
                 url,
             )
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            logger.detail("yt-dlp 下载音频...")
+            code, stdout, stderr = self._run_ytdlp_with_progress(cmd, timeout=180)
 
-            if proc.returncode != 0:
-                stderr = proc.stderr.strip()
-                self.errors.append(f"音频下载失败: {stderr[:200]}")
+            if code != 0:
+                self.errors.append(f"音频下载失败: {stderr.strip()[:200]}")
                 return ""
 
             # 查找生成的音频文件
@@ -429,9 +477,61 @@ class BilibiliCrawler(BaseCrawler):
                     return audio_path
 
             return ""
-        except subprocess.TimeoutExpired:
-            self.errors.append("音频下载超时")
-            return ""
         except Exception as e:
             self.errors.append(f"音频下载异常: {e}")
+            return ""
+
+    def _download_video_ytdlp(self, url: str, title: str) -> str:
+        """使用 yt-dlp 下载视频（用于截图，只下 720p 节省带宽）"""
+        try:
+            safe_title = sanitize_filename(title) if title else "bilibili_video"
+
+            # 缓存检测
+            for ext in ['mp4', 'webm', 'mkv', 'flv']:
+                cached = os.path.join(DOWNLOAD_DIR, f"{safe_title}.{ext}")
+                if os.path.exists(cached) and os.path.getsize(cached) > 0:
+                    logger.detail(f"视频已缓存: {os.path.basename(cached)}")
+                    return cached
+
+            output_template = os.path.join(DOWNLOAD_DIR, f"{safe_title}.%(ext)s")
+
+            cmd = self._build_ytdlp_cmd(
+                "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                "--merge-output-format", "mp4",
+                "--newline",  # 强制每行换行，否则进度条被管道缓冲
+                "-o", output_template,
+                "--no-playlist",
+                url,
+            )
+            logger.detail(f"yt-dlp 下载视频 ({safe_title}.mp4)...")
+            code, stdout, stderr = self._run_ytdlp_with_progress(cmd, timeout=300)
+
+            if code != 0:
+                self.errors.append(f"视频下载失败: {stderr.strip()[:200]}")
+                return ""
+
+            for ext in ['mp4', 'webm', 'mkv', 'flv']:
+                video_path = os.path.join(DOWNLOAD_DIR, f"{safe_title}.{ext}")
+                if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                    return video_path
+
+            return ""
+        except Exception as e:
+            self.errors.append(f"视频下载异常: {e}")
+            return ""
+
+    def _get_video_stream_url(self, url: str) -> str:
+        """使用 yt-dlp -g 获取视频直链（不下载文件）"""
+        try:
+            cmd = self._build_ytdlp_cmd(
+                "-f", "best[height<=720]/best",
+                "-g",  # 只打印 URL，不下载
+                "--no-playlist",
+                url,
+            )
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip().split('\n')[0]
+            return ""
+        except Exception:
             return ""

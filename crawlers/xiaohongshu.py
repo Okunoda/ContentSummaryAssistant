@@ -73,6 +73,7 @@ class XiaohongshuCrawler(BaseCrawler):
             # 6. 下载视频
             video_url = self._extract_video_url(note_data)
             if video_url:
+                result.video_url = video_url  # 保留流地址，用于在线截图
                 result.video_path = self._download_video(video_url, result.title)
                 if result.video_path:
                     # 提取音频用于转写
@@ -213,13 +214,20 @@ class XiaohongshuCrawler(BaseCrawler):
             if resp.status_code == 200:
                 total = int(resp.headers.get('content-length', 0))
                 downloaded = 0
+                last_pct = -1
                 with open(filepath, 'wb') as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
+                            if total > 0:
+                                pct = downloaded * 100 // total
+                                if pct != last_pct and pct % 20 == 0:
+                                    last_pct = pct
+                                    logger.detail(f"视频下载: {pct}% ({downloaded/1024/1024:.1f}/{total/1024/1024:.1f}MB)")
 
                 if downloaded > 0:
+                    logger.detail(f"视频下载完成: {downloaded/1024/1024:.1f}MB")
                     return filepath
 
             return ""
